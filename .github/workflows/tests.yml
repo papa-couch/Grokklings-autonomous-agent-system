@@ -1,0 +1,173 @@
+name: tests
+
+# Two jobs rather than one, because this project makes two different
+# promises and a single job would only check the weaker of them.
+#
+# The core is meant to run on nothing but the standard library
+# (docs/decisions/0001-python-stdlib.md). The only honest way to check that
+# is to install the package with no extras at all and see the suite pass —
+# which is exactly what a contributor gets from a clean checkout, and what
+# nobody had actually tried until this file was written. It failed: two
+# tests in test_optimize.py called into a function that looked for GEPA
+# before it validated its arguments.
+#
+# The optional half — both model backends, CJE, GEPA — is checked
+# separately, and there the interesting failure is silence. Every one of
+# those tests skips itself when its dependency is missing, so a broken
+# extras install leaves the suite green and the SDK contract tests
+# unchecked. That job therefore fails on any skip at all.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stdlib-only:
+    name: stdlib only (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install the core, with no extras
+        run: pip install -e .
+
+      - name: Nothing third-party is imported
+        # Every optional dependency is imported lazily, inside the function
+        # that needs it. Importing the whole package must therefore pull in
+        # none of them. Checking sys.modules after the fact catches an
+        # import that quietly moved to the top of a file, which is how a
+        # stdlib-only core stops being one.
+        run: |
+          python - <<'PY'
+          import importlib, pkgutil, sys, grokklings
+
+          names = [m.name for m in pkgutil.walk_packages(grokklings.__path__, "grokklings.")
+                   if not m.name.endswith("__main__")]  # importing it runs the CLI
+          for name in names:
+              importlib.import_module(name)
+
+          leaked = sorted(n for n in ("openai", "anthropic", "cje", "gepa", "numpy")
+                          if n in sys.modules)
+          print(f"imported {len(names)} modules")
+          if leaked:
+              raise SystemExit(f"the core pulled in {leaked} — an optional import is no longer lazy")
+          print("nothing third-party was imported")
+          PY
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t . -q
+
+  with-extras:
+    name: with every extra
+    runs-on: ubuntu-latest
+    # Pinned to the floor version on purpose: this job exists to check our
+    # code against real third-party packages, not to survey which Python
+    # versions those packages support. Widen it when there is a reason to.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install everything
+        run: pip install -e ".[dev,calibrate,optimize]"
+
+      - name: Tests, and no test may skip
+        # A skip here is the failure mode this job exists for: it means a
+        # dependency didn't install, and the tests that check our request
+        # shapes against the real SDK signatures never ran. Green and
+        # unchecked is worse than red.
+        run: |
+          python - <<'PY'
+          import sys, unittest
+
+          suite = unittest.defaultTestLoader.discover("tests", top_level_dir=".")
+          result = unittest.TextTestRunner(verbosity=1).run(suite)
+
+          if result.skipped:
+              print(f"\n{len(result.skipped)} test(s) skipped in the extras job:")
+              for test, why in result.skipped:
+                  print(f"  {test.id()} — {why}")
+              print("\nEverything must run here; a skip means an extra is not installed.")
+              sys.exit(1)
+
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - run: pip install pyflakes
+
+      - name: No dead imports or unused names
+        # pyflakes doesn't honour `# noqa`, and two guarded availability
+        # imports in the test suite legitimately carry one, so they are
+        # excluded by name rather than by weakening the check.
+        # Both commands need `|| true` because each reports "found nothing"
+        # as a non-zero exit, and "found nothing" is the outcome we want.
+        # That swallowing is also the trap: pyflakes writes "No such file or
+        # directory" to stderr and exits, so a wrong or renamed package path
+        # produced an empty report and a green step having linted nothing.
+        # The package rename is exactly the event that would have done it.
+        # So stderr is captured separately and any of it fails the step.
+        run: |
+          pyflakes grokklings/ tests/ > /tmp/raw.txt 2> /tmp/err.txt || true
+          if [ -s /tmp/err.txt ]; then
+            cat /tmp/err.txt
+            echo "pyflakes could not read something it was given — see above."
+            exit 1
+          fi
+          grep -v -e 'tests/test_optimize.py.*gepa' \
+                  -e 'tests/test_calibrate.py.*cje' \
+                  /tmp/raw.txt > /tmp/pyflakes.txt || true
+          cat /tmp/pyflakes.txt
+          test ! -s /tmp/pyflakes.txt
+          echo "pyflakes: clean"
+
+      - name: Every documentation link resolves
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+
+          # rglob on a directory that does not exist yields nothing and
+          # raises nothing, so a renamed package would quietly shrink what
+          # is checked and still report success. Assert the roots first.
+          for name in ("grokklings", "tests"):
+              if not pathlib.Path(name).is_dir():
+                  sys.exit(f"{name}/ is missing — the check would have passed on nothing")
+
+          roots = [*pathlib.Path(".").rglob("*.md"),
+                   *pathlib.Path("tests").glob("*.py"),
+                   *pathlib.Path("grokklings").rglob("*.py")]
+          broken = []
+          for path in roots:
+              if ".git" in path.parts:
+                  continue
+              for match in re.finditer(r"\]\((?!https?:|#)([^)#]+)", path.read_text(encoding="utf-8")):
+                  if not (path.parent / match.group(1)).resolve().exists():
+                      broken.append(f"{path}: {match.group(1)}")
+
+          print("\n".join(broken) if broken else f"every link resolves ({len(roots)} files checked)")
+          sys.exit(1 if broken else 0)
+          PY

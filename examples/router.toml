@@ -1,0 +1,95 @@
+# A colony where nobody names the route: three entry slots, and Grok picks
+# between them by what each one says it does. A slot that gets something
+# outside its remit returns not_mine, and the task is offered to the others
+# instead of ending up on the unplaced pile.
+#
+#   pip install 'grokklings[grok]'
+#   export XAI_API_KEY=...
+#   python -m grokklings run -c examples/router.toml
+#   python -m grokklings submit -c examples/router.toml --json '{"url": "https://example.com/a.png"}'
+#
+# Drop the [routing] section and this config stops loading: three entry
+# slots with nobody to choose between them is a config error, by design.
+
+[colony]
+name = "sorter"
+db = "sorter.db"
+max_hops = 10
+
+[intake]
+dedup_key = "url"
+
+[[source]]
+name = "hook"
+type = "webhook"
+host = "127.0.0.1"
+port = 8099
+path = "/ingest"
+
+[routing]
+model = "grok-4.6"
+
+# What success means here — your answer, not the colony's. Nothing is
+# scored until you write this, and a colony without it works exactly as
+# before. Scoring runs when you ask for it:
+#
+#   python -m grokklings score -c examples/router.toml
+#
+[success]
+looking_for = """
+Things worth my attention today, sorted so I can act on them without
+opening every link myself.
+"""
+counts_as = """
+A verdict I can act on without going back to the source: what it is, why it
+matters to me, and how sure the worker is. A short honest "not enough data"
+is a good result; a confident guess is not.
+"""
+never = """
+Stating anything that isn't in the source as if it were a fact. Dropping a
+task silently — if it can't be judged, say so.
+"""
+
+# The description is what the router reads. It's worth writing it for that
+# reader: what belongs here, and what doesn't.
+[[slot]]
+name = "images"
+description = "pictures, photos, screenshots, diagrams — anything whose point is what it looks like"
+context = """
+Describe what's in the image and why it might matter. If the link isn't
+actually an image, return not_mine — someone else will take it.
+"""
+# Optional: what a good result from *this* slot looks like. Read only when
+# scoring — the worker never sees it.
+success = "a description specific enough that I don't need to open the image"
+handler = "grokklings.handlers.grok:handle"
+timeout = 120
+entry = true
+
+[[slot]]
+name = "articles"
+description = "long-form text: posts, papers, documentation, anything meant to be read"
+context = """
+Summarise the argument and say what's new in it. If there's no substantial
+text at the link, return not_mine.
+"""
+handler = "grokklings.handlers.grok:handle"
+timeout = 180
+entry = true
+
+[[slot]]
+name = "releases"
+description = "software releases, changelogs, version tags, package listings"
+context = """
+Say what changed and whether anything in it breaks existing users. If this
+isn't a release, return not_mine.
+"""
+handler = "grokklings.handlers.grok:handle"
+timeout = 120
+entry = true
+
+[[output]]
+name = "archive"
+type = "file"
+path = "sorted.jsonl"
+shape = "full"

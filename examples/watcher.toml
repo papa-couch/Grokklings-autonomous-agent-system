@@ -1,0 +1,93 @@
+# A two-slot colony with model-backed workers: scheduled polling and a
+# webhook on the input side, different outputs for different result types.
+# Thinks with Grok by default; swap the handler to
+# "grokklings.handlers.anthropic:handle" (and its options.model) to think
+# with Claude instead — same contract, same config shape.
+#
+#   pip install 'grokklings[grok]'     # needs the openai package
+#   export XAI_API_KEY=...
+#   python -m grokklings run -c examples/watcher.toml
+
+[colony]
+name = "watcher"
+db = "watcher.db"
+max_hops = 10
+
+[intake]
+# The deduplication key — what makes an incoming item unique.
+dedup_key = "url"
+
+# Start each slot at one instance and grow toward its max_instances when
+# work actually piles up. Drop this section and each slot simply gets its
+# max_instances at startup, as before.
+[scaling]
+min_instances = 1
+queue_per_instance = 3
+grow_after = 10.0
+shrink_after = 60.0
+
+[[source]]
+name = "feed"
+type = "interval"
+seconds = 300
+handler = "examples.feed:fetch"
+
+[[source]]
+name = "hook"
+type = "webhook"
+host = "127.0.0.1"
+port = 8099
+path = "/ingest"
+
+[[slot]]
+name = "screen"
+description = "fast first-pass screening: drop junk, pass interesting items on"
+context = """
+You're the first to see an incoming item, deciding whether it's worth a full
+review.
+
+Hand it off to "deep_dive" if at least one holds:
+- the entity is new, never seen before;
+- there's a measurable sign of interest (growth, volume, mentions).
+
+Return done with a short note if it's obvious junk, an ad, or a repeat of
+something already known. Erring toward "hand off" is cheaper than missing
+something.
+"""
+handler = "grokklings.handlers.grok:handle"
+timeout = 120
+max_instances = 3
+can_route_to = ["deep_dive"]
+entry = true
+[slot.options]
+model = "grok-4.6"
+
+[[slot]]
+name = "deep_dive"
+description = "a full review of whatever passed the screen"
+context = """
+You're reviewing what the screening slot judged worth attention.
+
+Give: what this is, why it's interesting, what the risks are, how confident
+you are (0-1). If there isn't enough data for a verdict, say so — don't guess.
+"""
+handler = "grokklings.handlers.grok:handle"
+timeout = 300
+max_instances = 2
+[slot.options]
+model = "grok-4.6"
+
+# Different results go to different outputs: everything to the file, only
+# fully reviewed items to the webhook.
+[[output]]
+name = "archive"
+type = "file"
+path = "archive.jsonl"
+shape = "full"
+
+[[output]]
+name = "notify"
+type = "webhook"
+url = "http://127.0.0.1:9000/notify"
+[output.when]
+route_contains = ["deep_dive"]

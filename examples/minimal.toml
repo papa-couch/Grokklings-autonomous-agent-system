@@ -1,0 +1,22 @@
+# A minimal colony: manual submission -> one slot -> stdout output.
+# Run it:
+#   python -m grokklings run -c examples/minimal.toml
+#   python -m grokklings submit -c examples/minimal.toml --json '{"url": "https://example.com"}'
+
+[colony]
+name = "minimal"
+db = "colony.db"
+
+[intake]
+dedup_key = "url"
+
+[[slot]]
+name = "triage"
+description = "first pass over incoming items"
+handler = "grokklings.handlers.echo:handle"
+timeout = 30
+entry = true
+
+[[output]]
+name = "output"
+type = "console"

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grokklings"
+version = "0.1.0"
+description = "A colony of workers that sorts through a stream of tasks: intake, dispatcher, slots, output"
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "MIT"}
+dependencies = []          # the core is stdlib-only
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+[project.urls]
+Source = "https://github.com/papa-couch/Grokklings-autonomous-agent-system"
+Changelog = "https://github.com/papa-couch/Grokklings-autonomous-agent-system/blob/main/CHANGELOG.md"
+Decisions = "https://github.com/papa-couch/Grokklings-autonomous-agent-system/tree/main/docs/decisions"
+
+[project.optional-dependencies]
+grok = ["openai>=1.0"]         # needed only for grokklings.handlers.grok — the primary backend
+anthropic = ["anthropic>=1.0"] # needed only for grokklings.handlers.anthropic
+calibrate = ["cje-eval>=0.7"]  # needed only for `grokklings calibrate`
+optimize = ["gepa>=0.1"]       # needed only for `grokklings optimize`
+# Both backend SDKs together. Installing them turns on tests/test_sdk_contract.py,
+# which binds our call shapes against their real signatures; without them that
+# file skips and the request side goes unchecked.
+dev = ["openai>=1.0", "anthropic>=1.0"]
+
+[project.scripts]
+grokklings = "grokklings.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["grokklings*"]
